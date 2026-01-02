@@ -36,6 +36,7 @@ class Building:
     upg: Optional[str] = None  # resource input?
     cB: Optional[str] = None
     fz: Optional[str] = None
+    fort: Optional[int] = None  # fortification level
 
     def to_dict(self) -> Dict[str, Any]:
         """Convert to dictionary format expected by API."""

@@ -17,6 +17,7 @@ from .exceptions import (
     ServerError,
 )
 from .models import UpdateSavedRequest, SaveBaseRequest, BaseData, UserData
+from .templates import CheckersTemplate, UltraTemplate, Template
 
 
 class BYMRClient:
@@ -472,6 +473,9 @@ class BYMRClient:
 
         self.mutate_server(resource_mutation)
 
+    def set_buildings(self, template: Template):
+        self.mutate_server({"buildingdata": template.to_dict()})
+
     def set_resources(
         self,
         r1: Optional[int] = None,
@@ -879,52 +883,82 @@ class BYMRClient:
         # Step 2: Take over the cell
         self.takeover_cell(baseid, takeover_resources)
 
-        # Step 3: Load the base in build mode
-        outpost_data = self.load_base(baseid, load_type="build")
-
-        # Step 4: Save the outpost to finalize takeover
-        response = self.save_outpost(outpost_data)
+        # Step 3: Get beast mode kit
+        response = self.get_ultra_kit_for_outpost(baseid)
 
         return response
 
-    def buy_starter_kit(self, baseid: str) -> Dict[str, Any]:
-        """
-        Purchase starter kit for an outpost that already has buildings.
+    def get_ultra_kit_for_all_outposts(self, initial_baseid: str):
+        outpost_data = self.load_base(initial_baseid, load_type="build")
+        outpost_list = map(lambda op: op[2], outpost_data.get("outposts"))
 
-        Note: This only works on bases that have buildingdata (not empty bases).
-        The starter kit provides resources to build/upgrade, it doesn't create buildings.
+        for outpost_bid in outpost_list:
+            self.get_ultra_kit_for_outpost(outpost_bid)
+
+    def get_ultra_kit_for_outpost(self, baseid: str, template: Template = None) -> Dict[str, Any]:
+        """
+        Set building layout for an outpost.
 
         Args:
-            baseid: The base ID to purchase starter kit for
+            baseid: The base ID of the outpost
+            buildingdata: Dictionary containing building placement data
 
         Returns:
             API response dictionary
 
         Example:
             ```python
-            # Buy starter kit for an existing outpost
-            response = client.buy_starter_kit("20444959360271")
+            # Set buildings for an outpost
+            buildings = {
+                "0": {"X": 0, "fort": 4, "t": 112, "Y": -50, "id": 0},
+                "2": {"l": 5, "X": 130, "t": 17, "Y": 60, "id": 2},
+                # ... more buildings
+            }
+            response = client.set_outpost_buildings("20444959360271", buildings)
             ```
         """
         # Load the base
-        base_data = self.load_base(baseid, load_type="build")
+        outpost_data = self.load_base(baseid, load_type="build")
 
-        # Check if base has buildings
-        if not base_data.get("buildingdata") or len(base_data.get("buildingdata", {})) <= 1:
-            print(f"Warning: Base {baseid} has no buildings. Starter kit may not work.")
+        outpost_data["resources"] = {
+            "r1": 0,
+            "r2": 0,
+            "r3": 0,
+            "r4": 0,
+            "r1max": 990310000,
+            "r2max": 990310000,
+            "r3max": 990310000,
+            "r4max": 990310000,
+        }
 
-        # Set starter kit flag
-        if "stats" not in base_data:
-            base_data["stats"] = {}
-        if "achievements" not in base_data["stats"]:
-            base_data["stats"]["achievements"] = {"s": {}, "c": {}}
-        elif "s" not in base_data["stats"]["achievements"]:
-            base_data["stats"]["achievements"]["s"] = {}
+        outpost_data["damage"] = 0
 
-        base_data["stats"]["achievements"]["s"]["starterkit"] = 1
+        towers = [
+            CheckersTemplate.towers.TwigSnapper(),
+            CheckersTemplate.towers.RailgunTower(),
+            CheckersTemplate.towers.GooFactory(),
+            CheckersTemplate.towers.FlakTower(),
+            CheckersTemplate.towers.PuttySquisher(),
+            CheckersTemplate.towers.SniperTower(),
+            CheckersTemplate.towers.PebbleShiner(),
+            CheckersTemplate.towers.TeslaTower(),
+        ]
 
-        # Save with starter kit flag
-        response = self.save_outpost(base_data)
+        # Update building data
+        outpost_data["buildingdata"] = (
+            template.to_dict()
+            if template
+            else CheckersTemplate()
+            .add_checkers()
+            .add_patch(towers=towers, bounds=(-1000, 1000, -1000, -500))
+            .add_patch(towers=towers, bounds=(-1000, 1000, 500, 1000))
+            .add_patch(towers=towers, bounds=(-1000, -550, -500, 500))
+            .add_patch(towers=towers, bounds=(550, 1000, -500, 500))
+            .to_dict()
+        )
+
+        # Save the outpost with new buildings
+        response = self.save_outpost(outpost_data)
 
         return response
 
@@ -975,7 +1009,7 @@ class BYMRClient:
         self,
         area_response: Dict[str, Any],
         current_username: str,
-        include_wild_monsters: bool = False,
+        include_base_types: list = None,
     ) -> list:
         """
         Extract enemy base IDs from area response data.
@@ -983,11 +1017,24 @@ class BYMRClient:
         Args:
             area_response: Response from get_area()
             current_username: The current user's username to exclude from targets
-            include_wild_monsters: If True, include wild monster bases (b=1) in the results (default: False)
+            include_base_types: List of base types to include. Options: "player", "wild_monster"
+                               Default: ["player"] (only player bases)
 
         Returns:
             List of dictionaries containing enemy base info (bid, name, uid, coords)
         """
+        if include_base_types is None:
+            include_base_types = ["player"]
+
+        # Map base type strings to their numeric codes
+        type_mapping = {
+            "wild_monster": 1,
+            "player": 3,
+        }
+
+        # Convert string types to numeric codes
+        allowed_types = [type_mapping[bt] for bt in include_base_types if bt in type_mapping]
+
         enemy_bases = []
         data = area_response.get("data", {})
 
@@ -1000,15 +1047,9 @@ class BYMRClient:
                 # Get cell type (b=1: wild monster, b=3: player base)
                 cell_type = cell_data.get("b", 0)
 
-                # Skip if it's not a valid target
-                if include_wild_monsters:
-                    # Include both wild monsters (b=1) and player bases (b=3)
-                    if cell_type not in [1, 3]:
-                        continue
-                else:
-                    # Only include player bases (b=3)
-                    if cell_type != 3:
-                        continue
+                # Skip if it's not in our allowed types
+                if cell_type not in allowed_types:
+                    continue
 
                 # Skip if it's the current user's base (only applies to player bases)
                 cell_name = cell_data.get("n", "")
@@ -1044,7 +1085,7 @@ class BYMRClient:
         attacker_champion: Optional[list] = None,
         takeover_resources: Optional[Dict[str, int]] = None,
         delay_between_attacks: float = 1.0,
-        include_wild_monsters: bool = False,
+        include_base_types: list = None,
     ) -> Dict[str, Any]:
         """
         Get area data, find all enemy bases, and destroy/takeover each one.
@@ -1059,7 +1100,8 @@ class BYMRClient:
             attacker_champion: Optional champion data for destroy_base
             takeover_resources: Optional resources for takeover
             delay_between_attacks: Seconds to wait between each attack (default: 1.0)
-            include_wild_monsters: If True, also destroy and takeover wild monster bases (default: False)
+            include_base_types: List of base types to include. Options: "player", "wild_monster"
+                               Default: ["player"] (only player bases)
 
         Returns:
             Dictionary with results summary and details
@@ -1079,7 +1121,7 @@ class BYMRClient:
                 x=360,
                 y=270,
                 current_username="josesteve",
-                include_wild_monsters=True,
+                include_base_types=["player", "wild_monster"],
             )
             ```
         """
@@ -1095,7 +1137,7 @@ class BYMRClient:
 
         # Step 2: Extract enemy bases
         enemy_bases = self.get_enemy_bases_from_area(
-            area_response, current_username, include_wild_monsters
+            area_response, current_username, include_base_types
         )
 
         if not enemy_bases:
@@ -1166,7 +1208,7 @@ class BYMRClient:
         takeover_resources: Optional[Dict[str, int]] = None,
         delay_between_attacks: float = 1.0,
         delay_between_iterations: float = 2.0,
-        include_wild_monsters: bool = False,
+        include_base_types: list = None,
     ) -> Dict[str, Any]:
         """
         Iteratively conquer all bases within range, expanding from your owned bases.
@@ -1187,7 +1229,8 @@ class BYMRClient:
             takeover_resources: Optional resources for takeover
             delay_between_attacks: Seconds to wait between each attack (default: 1.0)
             delay_between_iterations: Seconds to wait between expansion iterations (default: 2.0)
-            include_wild_monsters: If True, also destroy wild monster bases (default: False)
+            include_base_types: List of base types to include. Options: "player", "wild_monster"
+                               Default: ["player"] (only player bases)
 
         Returns:
             Dictionary with conquest results and statistics
@@ -1203,9 +1246,12 @@ class BYMRClient:
             print(f"Total bases conquered: {result['total_conquered']}")
             ```
         """
+        if include_base_types is None:
+            include_base_types = ["player"]
+
         print(f"\n🗺️  Starting conquest from {len(main_base_coords)} base(s)")
         print(f"   Attack range: {attack_range}")
-        print(f"   Include wild monsters: {include_wild_monsters}\n")
+        print(f"   Include base types: {', '.join(include_base_types)}\n")
 
         # Track all owned bases (starts with main bases)
         owned_bases = set()
@@ -1241,11 +1287,11 @@ class BYMRClient:
                         print(f"   ✗ Failed to fetch area data")
                         continue
 
-                    # Get player bases
+                    # Get enemy bases based on specified types
                     enemy_bases = self.get_enemy_bases_from_area(
                         area_response,
                         current_username,
-                        include_wild_monsters,
+                        include_base_types,
                     )
 
                     # Add to targets dict (deduplicates by baseid)
@@ -1256,13 +1302,12 @@ class BYMRClient:
                     wild_bases = self.get_enemy_bases_from_area(
                         area_response,
                         current_username,
-                        include_wild_monsters=True,
+                        ["wild_monster"],
                     )
 
-                    # Filter to only wild monsters (not player bases)
+                    # Add wild monsters to separate dict
                     for base in wild_bases:
-                        if base not in enemy_bases:  # It's a wild monster
-                            wild_monsters_dict[base["bid"]] = base
+                        wild_monsters_dict[base["bid"]] = base
 
                     if enemy_bases:
                         print(f"   ✓ Found {len(enemy_bases)} enemy base(s) in range")
